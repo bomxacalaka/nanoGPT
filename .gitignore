@@ -7,6 +7,17 @@ __pycache__/
 *.pkl
 *.pt
 *.pyc
-input.txt
+*.txt
 env/
 venv/
+
+# Datasets, logs and models
+*.log
+*.csv
+*.json
+*.yaml
+*.wandb
+*.png
+*.onnx
+*.jsonl
+latest-run

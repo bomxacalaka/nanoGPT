@@ -28,12 +28,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from tokenizer import Tokenizer
+from colour_print import cprint
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
 eval_interval = 2000
+eval_interval_extra = 6000
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
@@ -43,6 +46,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
+wandb_model_upload = False # upload the model checkpoint to wandb
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
@@ -141,6 +145,10 @@ if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
+    stoi, itos = meta['stoi'], meta['itos']
+    tokenizer = Tokenizer(stoi=stoi, itos=itos)
+    encode = tokenizer.encode
+    decode = tokenizer.decode
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
@@ -252,6 +260,37 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
+import sys
+import time
+import threading
+
+stop_flag = False
+save_flag = False
+save_asap_flag = False
+save_checkpoint = False
+
+def key_listener():
+    global stop_flag, save_flag, save_asap_flag
+    while True:
+        key = sys.stdin.read(1).lower()  # blocking call, waits for 1 char
+        if key == 's':
+            stop_flag = True
+            break
+        if key == 'd':
+            save_flag = True
+        if key == 'a':
+            save_asap_flag = True
+        if key == 'c':
+            save_checkpoint = True
+
+# start listener in background
+threading.Thread(target=key_listener, daemon=True).start()
+
+print("Starting training loop, press 's' to stop, 'd' to save checkpoint, 'a' to save on next iteration")
+val_data = {}
+prev_val_data = {}  # Initialize dictionary to store previous validation results
+
 while True:
 
     # determine and set the learning rate for this iteration
@@ -271,7 +310,104 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        # Sample from start token
+        with torch.no_grad():
+            start_token = torch.tensor([encode('<')], device='cuda:0')
+            end_token = encode('>')
+            logits = model.generate(start_token, max_new_tokens=block_size, end_tokens=end_token)
+            # Decode
+            response = decode(logits[0].tolist())
+            print(response)
+
+            with open('evolution.txt', 'a') as f:
+                f.write(response + '\n')
+            
+            
+            if iter_num % eval_interval_extra == 0 and master_process and False:
+                try:
+                    response_split = response.split('+')
+                    x_ = int(response_split[0].strip('\n<|start|>'))
+                    y_ = int(response_split[1].split('=<|answer|>')[0])
+                    z_ = int(response.split('=<|answer|>')[-1].replace('<|end|>', '').strip())
+                    cprint(f"{x_} + {y_} == {z_}", "green") if x_ + y_ == z_ else cprint(f"{x_} + {y_} != {z_}", "red")
+                    
+                    
+                    from itertools import product
+                    from tqdm.auto import tqdm
+
+                    # Define ranges to test
+                    ranges = [
+                        (0, 10, "Single-digit"),
+                        (10, 100, "Two-digit"),
+                        (100, 1000, "Three-digit")
+                    ]
+
+                    # Initialize counters for each range
+                    results = {}
+                    for start, end, name in ranges:
+                        results[name] = {"correct": 0, "wrong": 0}
+
+                    # Use a single progress bar
+                    with tqdm(total=len(ranges), desc="Testing model accuracy") as pbar:
+                        for start, end, name in ranges:
+                            # Test a sample of number pairs from this range
+                            combinations = list(product(range(start, end), range(start, end)))
+                            
+                            # Limit combinations for larger ranges to avoid excessive computation
+                            if len(combinations) > 500:
+                                import random
+                                random.seed(1337)  # For reproducibility
+                                combinations = random.sample(combinations, 500)
+
+                            for i, j in combinations:
+                                line = f'<|start|>{i:04d}+{j:04d}=<|answer|>'
+                                custom_ids = encode(line)
+                                custom_x = (torch.tensor(custom_ids, dtype=torch.long, device=device)[None, ...])
+                                special_end_token = encode('<|end|>')
+
+                                with torch.no_grad():
+                                    with ctx:
+                                        logits = model.generate(custom_x, block_size, end_tokens=special_end_token)
+                                        decoded = decode(logits[0].tolist())
+                                        try:
+                                            z_ = int(decoded.split('=<|answer|>')[-1].replace('<|end|>', '').strip())
+                                            if i + j == z_:
+                                                results[name]["correct"] += 1
+                                            else:
+                                                results[name]["wrong"] += 1
+                                        except:
+                                            results[name]["wrong"] += 1
+                            
+                            # Update progress bar
+                            total = results[name]["correct"] + results[name]["wrong"]
+                            accuracy = results[name]["correct"]/total*100 if total > 0 else 0
+                            status = f"{name}: {accuracy:.2f}% ({results[name]['correct']}/{total})"
+                            pbar.set_description(status)
+                            pbar.update(1)
+
+                    # Display final accuracy for each range
+                    print("\nFinal model accuracy by range:")
+                    for start, end, name in ranges:
+                        correct = results[name]["correct"]
+                        total = correct + results[name]["wrong"]
+                        print(f"{name} numbers ({start}-{end-1}): {correct}/{total} ({correct/total*100:.2f}%)")
+                        val_data[name] = correct/total*100 if total > 0 else 0
+
+                        # Compare with previous val_data and print difference with colors
+                        if name in prev_val_data:
+                            diff = val_data[name] - prev_val_data[name]
+                            if diff > 0:
+                                cprint(f"Validation accuracy for {name} changed by +{diff:.2f}%", "green")
+                            elif diff < 0:
+                                cprint(f"Validation accuracy for {name} changed by {diff:.2f}%", "red")
+                            else:
+                                cprint(f"Validation accuracy for {name} unchanged", "blue")
+                        prev_val_data[name] = val_data[name]
+
+                except Exception as e:
+                    print(f"Error processing response: {e}")
+        if losses['val'] < best_val_loss or always_save_checkpoint or save_flag:
+            save_flag = False
             best_val_loss = losses['val']
             if iter_num > 0:
                 checkpoint = {
@@ -284,6 +420,17 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+    if save_asap_flag and master_process:
+        save_asap_flag = False
+        print(f"saving checkpoint to {out_dir}")
+        torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+    if stop_flag:
+        print("Stopping training...")
+        break
+    if save_checkpoint:
+        pass
+
+
     if iter_num == 0 and eval_only:
         break
 
@@ -334,3 +481,18 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+
+if wandb_log and master_process and wandb_model_upload:
+    # Load the best checkpoint
+    checkpoint_path = os.path.join(out_dir, 'ckpt.pt')
+    if os.path.exists(checkpoint_path):
+        print(f"Uploading best checkpoint from {checkpoint_path} and meta to wandb")
+        artifact = wandb.Artifact(f'model-{wandb.run.id}', type='model')
+        artifact.add_file(checkpoint_path)
+        artifact.add_file(meta_path)
+        wandb.log_artifact(artifact)
+        print("Checkpoint and meta uploaded to wandb successfully")
+    wandb.finish()
+
+print("bye")

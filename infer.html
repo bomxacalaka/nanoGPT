@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vibe Math App</title>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --card: #ffffff;
+      --text: #1d1d1f;
+      --muted: #6e6e73;
+      --ring: #d2d2d7;
+      --radius: 12px;
+      --shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #000000;
+        --card: #1c1c1e;
+        --text: #f5f5f7;
+        --muted: #a1a1a6;
+        --ring: #3a3a3c;
+        --shadow: 0 4px 16px rgba(0,0,0,0.6);
+      }
+      input, textarea { color-scheme: dark; }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 600px;
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--ring);
+      padding: 32px;
+    }
+
+    h1 {
+      font-size: clamp(22px, 3vw, 28px);
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+
+    p.subtitle {
+      color: var(--muted);
+      text-align: center;
+      font-size: 15px;
+      margin-bottom: 28px;
+    }
+
+    .stack { display: grid; gap: 20px; }
+
+    label { font-size: 13px; font-weight: 500; color: var(--muted); }
+
+    .field { display: grid; gap: 6px; }
+
+    input[type="text"], textarea, .output-box {
+      width: 100%;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid var(--ring);
+      background: var(--card);
+      font-size: 16px;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input[type="text"]:focus, textarea:focus {
+      border-color: #0071e3;
+      box-shadow: 0 0 0 3px rgba(0,113,227,0.3);
+      outline: none;
+    }
+
+    textarea { min-height: 100px; resize: vertical; }
+
+    .output-box {
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      color: var(--muted);
+    }
+
+    .info {
+      margin-top: 8px;
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .footer {
+      margin-top: 12px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main class="card" role="main">
+    <h1>Vibe Maths</h1>
+    <p class="subtitle">Baby GPT model trained on mathematical expressions.</p>
+
+    <div class="stack" aria-live="polite">
+      <div class="field">
+        <label for="input-box">Your Input</label>
+        <input id="input-box" type="text" placeholder="Type something…" />
+      </div>
+
+      <div class="field">
+        <label for="output">Output</label>
+        <div id="output" class="output-box">Loading model...</div>
+      </div>
+
+      <div id="model-info" class="info">Loading model information…</div>
+    <div class="footer">© <script>document.write(new Date().getFullYear())</script> DrBom</div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script>
+    const CONFIG = {
+      maxLength: 100,
+      temperature: 0.8,
+      modelPath: 'out-shakespeare-char/ckpt.onnx',
+      tokenizerPath: 'out-shakespeare-char/tokenizer.json'
+    };
+
+    const state = { session: null, tokenizer: null };
+
+    class ModelService {
+      static async loadTokenizer() {
+        try {
+          const response = await fetch(CONFIG.tokenizerPath);
+          const config = await response.json();
+          state.tokenizer = {
+            vocab_size: config.vocab_size,
+            vocab: config.vocab.stoi,
+            reverseVocab: config.vocab.itos
+          };
+          return true;
+        } catch (error) {
+          this.handleError('Failed to load tokenizer', error);
+          return false;
+        }
+      }
+
+    static displayModelInfo() {
+      const modelInfo = document.getElementById('model-info');
+      if (!state.tokenizer) return;
+
+      const vocab = state.tokenizer.vocab;
+      const specialTokens = Object.keys(vocab).filter(t => t.startsWith('<|') && t.endsWith('|>'));
+      const numbers = Object.keys(vocab).filter(t => /^\d$/.test(t));
+      const operators = Object.keys(vocab).filter(t => /^[+\-*/=]$/.test(t));
+      
+      // Calculate number of parameters
+      const paramCount = state.session ? Object.values(state.session._model.weightMap)
+        .reduce((sum, tensor) => sum + tensor.size, 0) : 0;
+      const paramCountFormatted = (paramCount / 1000000).toFixed(2) + 'M';
+
+      modelInfo.innerHTML = `
+        <div><strong>Model Information:</strong></div>
+        <div>Special Tokens: ${specialTokens.join(', ')}</div>
+        <div>Tokens: ${numbers.join(', ')}</div>
+        <div>Max supported digits: 9+9=</div>
+        <div>Vocabulary Size: ${state.tokenizer.vocab_size}</div>
+        <div>Operators: ${operators.join(' ')}</div>
+        <div>Parameters: ${paramCountFormatted}</div>
+      `;
+    }
+
+      static async initialize() {
+        try {
+          if (!await this.loadTokenizer()) throw new Error('Tokenizer initialization failed');
+
+          state.session = await ort.InferenceSession.create(CONFIG.modelPath, { executionProviders: ['wasm'] });
+          document.getElementById('input-box').disabled = false;
+          document.getElementById('output').textContent = 'Ready for input';
+          this.displayModelInfo();
+        } catch (error) {
+          this.handleError('Model initialization failed', error);
+        }
+      }
+
+      static handleError(message, error) {
+        console.error(message, error);
+        document.getElementById('output').textContent = `${message}. Check console.`;
+      }
+    }
+
+    class TextProcessor {
+      static tokenize(text) {
+        if (!state.tokenizer) return [];
+        const tokens = [state.tokenizer.vocab['<|start|>']];
+        for (const char of text) {
+          if (state.tokenizer.vocab[char] !== undefined) tokens.push(state.tokenizer.vocab[char]);
+        }
+        return tokens;
+      }
+
+      static detokenize(tokens) {
+        if (!state.tokenizer) return '';
+        return tokens.map(id => {
+          const token = state.tokenizer.reverseVocab[id];
+          return (token && token.startsWith('<|') && token.endsWith('|>')) ? '' : token || '';
+        }).join('');
+      }
+
+      static sampleFromLogits(logits) {
+        if (!logits.every(l => typeof l === 'number' && !isNaN(l))) {
+          return state.tokenizer.vocab['<|end|>'];
+        }
+        const scaled = logits.map(l => l / CONFIG.temperature);
+        const max = Math.max(...scaled);
+        const exp = scaled.map(l => Math.exp(Math.min(l - max, 50)));
+        const sum = exp.reduce((a, b) => a + b, 0);
+        const probs = exp.map(e => e / (sum || 1));
+
+        const r = Math.random();
+        let cum = 0;
+        for (let i = 0; i < probs.length; i++) {
+          cum += probs[i];
+          if (r < cum) return i;
+        }
+        return probs.length - 1;
+      }
+    }
+
+    class Generator {
+      static async generate(inputText) {
+        if (!state.session) return;
+        try {
+          let tokens = TextProcessor.tokenize(inputText);
+          let outputText = inputText;
+
+          for (let i = 0; i < CONFIG.maxLength; i++) {
+            const inputTensor = new ort.Tensor(
+              'int64',
+              new BigInt64Array(tokens.map(t => BigInt(t))),
+              [1, tokens.length]
+            );
+
+            const outputs = await state.session.run({ 'input_ids': inputTensor });
+            if (!outputs['logits']) throw new Error('No logits in model output');
+
+            const dims = outputs['logits'].dims;
+            const logitsData = outputs['logits'].data;
+            const vocabSize = 16;
+            const lastTokenLogits = Array.from(
+              logitsData.slice((dims[0] * dims[1] * dims[2]) - vocabSize)
+            );
+
+            const nextToken = TextProcessor.sampleFromLogits(lastTokenLogits);
+            if (nextToken === state.tokenizer.vocab['<|end|>']) break;
+
+            tokens.push(nextToken);
+            outputText += TextProcessor.detokenize([nextToken]);
+            document.getElementById('output').textContent = outputText;
+
+            inputTensor.dispose();
+          }
+        } catch (error) {
+          ModelService.handleError('Error during text generation', error);
+        }
+      }
+    }
+
+    class App {
+      static init() {
+        const inputBox = document.getElementById('input-box');
+        let generateTimeout;
+
+        inputBox.disabled = true;
+        ModelService.initialize();
+
+        inputBox.addEventListener('input', (e) => {
+          clearTimeout(generateTimeout);
+          generateTimeout = setTimeout(() => {
+            Generator.generate(e.target.value);
+          }, 500);
+        });
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', App.init);
+  </script>
+</body>
+</html>

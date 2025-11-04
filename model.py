@@ -169,13 +169,16 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         device = idx.device
-        b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        t = idx.size(1)
+        # During inference, we'll allow longer sequences but only use the first block_size positions
+        t = min(t, self.config.block_size)
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        # Use min(t, block_size) for position embeddings to support longer sequences during inference
+        pos_t = min(t, self.config.block_size)
+        pos_emb = self.transformer.wpe(torch.arange(pos_t, device=device)) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
@@ -303,11 +306,12 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, end_tokens=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        If end_tokens is provided, generation will stop when these tokens are generated in sequence.
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
@@ -326,5 +330,13 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+            
+            # check if end tokens sequence is generated
+            if end_tokens is not None:
+                if idx.size(1) >= len(end_tokens):
+                    # Check if the last n tokens match the end_tokens
+                    last_tokens = idx[:, -len(end_tokens):]
+                    if torch.all(last_tokens == torch.tensor(end_tokens, device=idx.device)).item():
+                        break
 
         return idx

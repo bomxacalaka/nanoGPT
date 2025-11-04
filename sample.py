@@ -7,10 +7,11 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+from tokenizer import Tokenizer
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
-out_dir = 'out' # ignored if init_from is not 'resume'
+out_dir = 'out-shakespeare' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
@@ -19,7 +20,7 @@ top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 p
 seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-compile = False # use PyTorch 2.0 to compile the model to be faster
+compile = True # use PyTorch 2.0 to compile the model to be faster
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -64,8 +65,9 @@ if load_meta:
         meta = pickle.load(f)
     # TODO want to make this more general to arbitrary encoder/decoder schemes
     stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: ''.join([itos[i] for i in l])
+    tokenizer = Tokenizer(stoi=stoi, itos=itos)
+    encode = tokenizer.encode
+    decode = tokenizer.decode
 else:
     # ok let's assume gpt-2 encodings by default
     print("No meta.pkl found, assuming GPT-2 encodings...")
@@ -84,6 +86,26 @@ x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            special_end_token = encode('<|end|>')
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k, end_tokens=special_end_token)
             print(decode(y[0].tolist()))
             print('---------------')
+
+
+# print("\nTalk to GPT:")
+# while True:
+#     custom_prompt = []
+#     line = input('> ')
+#     custom_prompt.append(line)
+
+#     custom_prompt = "\n".join(custom_prompt)
+#     custom_ids = encode(custom_prompt)
+#     print(custom_ids)
+#     custom_x = (torch.tensor(custom_ids, dtype=torch.long, device=device)[None, ...])
+
+#     special_end_token = encode('<|end|>')
+
+#     with torch.no_grad():
+#         with ctx:
+#             y = model.generate(custom_x, max_new_tokens, temperature=temperature, top_k=top_k, end_tokens=special_end_token)
+#             print('GPT:', decode(y[0].tolist()))
