@@ -21,15 +21,24 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+from pathlib import Path
 
 import numpy as np
 import torch
+import torchaudio
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 from tokenizer import Tokenizer
 from colour_print import cprint
+from audio_codec import decode_codes
+from audio_codec import encode_audio_file
+from audio_codec import encode_waveform
+from audio_codec import generate_audio_tokens
+from audio_codec import load_encodec_model
+from audio_codec import save_waveform
+from audio_codec import unflatten_codes
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -76,6 +85,13 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# audio sampling
+sample_prompt_audio = ''
+sample_prompt_seconds = 0.0
+sample_max_new_seconds = 0.5
+sample_temperature = 0.8
+sample_top_k = 50
+sample_output_subdir = 'samples'
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -117,13 +133,14 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
+data_bin_dtype = np.uint16
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=data_bin_dtype, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=data_bin_dtype, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -141,15 +158,123 @@ best_val_loss = 1e9
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
 meta_vocab_size = None
+meta = {}
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
-    stoi, itos = meta['stoi'], meta['itos']
-    tokenizer = Tokenizer(stoi=stoi, itos=itos)
-    encode = tokenizer.encode
-    decode = tokenizer.decode
+    if 'data_dtype' in meta:
+        data_bin_dtype = np.dtype(meta['data_dtype'])
+    if 'stoi' in meta and 'itos' in meta:
+        stoi, itos = meta['stoi'], meta['itos']
+        tokenizer = Tokenizer(stoi=stoi, itos=itos)
+        encode = tokenizer.encode
+        decode = tokenizer.decode
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+
+dataset_type = meta.get('dataset_type', 'text')
+audio_sampling_enabled = dataset_type == 'audio_codec' and bool(sample_prompt_audio)
+audio_sample_dir = os.path.join(out_dir, sample_output_subdir)
+audio_codec_model = None
+audio_prompt_tokens = None
+audio_prompt_codes = None
+
+
+def maybe_trim_waveform(wav, sample_rate, max_seconds):
+    if max_seconds <= 0:
+        return wav
+    max_samples = int(sample_rate * max_seconds)
+    if wav.size(-1) <= max_samples:
+        return wav
+    return wav[..., :max_samples]
+
+
+def sanitize_audio_tokens(tokens, separator_token_id):
+    if separator_token_id is None:
+        return tokens
+    for idx, token in enumerate(tokens):
+        if token == separator_token_id:
+            return tokens[:idx]
+    return tokens
+
+
+@torch.no_grad()
+def save_audio_progress_sample(step, model_for_sampling):
+    global audio_codec_model, audio_prompt_tokens, audio_prompt_codes
+
+    if not audio_sampling_enabled:
+        return
+
+    if audio_codec_model is None:
+        audio_codec_model = load_encodec_model(
+            model_name=meta['model_name'],
+            bandwidth=meta['bandwidth'],
+            device='cpu',
+        )
+
+    if audio_prompt_tokens is None:
+        prompt_wav, prompt_sample_rate = torchaudio.load(sample_prompt_audio)
+        prompt_wav = maybe_trim_waveform(prompt_wav, prompt_sample_rate, sample_prompt_seconds)
+        prompt_batch = encode_waveform(
+            audio_codec_model,
+            prompt_wav,
+            prompt_sample_rate,
+            device='cpu',
+            codebook_size=meta['codebook_size'],
+        )
+        audio_prompt_tokens = prompt_batch.flattened_tokens.tolist()
+        audio_prompt_codes = prompt_batch.codes
+        if len(audio_prompt_tokens) > raw_model.config.block_size:
+            prompt_seconds = len(audio_prompt_tokens) / meta['tokens_per_second']
+            visible_seconds = raw_model.config.block_size / meta['tokens_per_second']
+            print(
+                f"warning: audio sample prompt is {prompt_seconds:.2f}s but block_size only "
+                f"covers {visible_seconds:.2f}s; generation is conditioned on the tail only"
+            )
+
+    tokens_per_second = meta['tokens_per_second']
+    max_new_tokens = int(sample_max_new_seconds * tokens_per_second)
+    separator_token_id = meta.get('separator_token_id')
+    num_codebooks = meta['num_codebooks']
+    codebook_size = meta['codebook_size']
+
+    x = torch.tensor(audio_prompt_tokens, dtype=torch.long, device=device)[None, ...]
+    generated = generate_audio_tokens(
+        model_for_sampling,
+        x,
+        max_new_tokens=max_new_tokens,
+        num_codebooks=num_codebooks,
+        codebook_size=codebook_size,
+        temperature=sample_temperature,
+        top_k=sample_top_k,
+    )
+
+    all_tokens = sanitize_audio_tokens(generated[0].tolist(), separator_token_id)
+    valid_token_count = len(all_tokens) - (len(all_tokens) % num_codebooks)
+    all_tokens = all_tokens[:valid_token_count]
+    if not all_tokens:
+        print(f"audio sample at step {step} produced no decodable tokens")
+        return
+
+    codes = unflatten_codes(
+        torch.tensor(all_tokens, dtype=torch.long),
+        num_codebooks=num_codebooks,
+        codebook_size=codebook_size,
+    )
+    wav = decode_codes(audio_codec_model, codes, device='cpu')
+    os.makedirs(audio_sample_dir, exist_ok=True)
+    prompt_wav = decode_codes(audio_codec_model, audio_prompt_codes, device='cpu')
+    prompt_num_samples = prompt_wav.size(-1)
+    continuation_wav = wav[:, prompt_num_samples:]
+
+    sample_path = os.path.join(audio_sample_dir, f"step_{step:06d}_full.wav")
+    continuation_path = os.path.join(audio_sample_dir, f"step_{step:06d}_continuation.wav")
+    prompt_path = os.path.join(audio_sample_dir, f"step_{step:06d}_prompt.wav")
+    save_waveform(prompt_path, prompt_wav, meta['sample_rate'])
+    save_waveform(sample_path, wav, meta['sample_rate'])
+    save_waveform(continuation_path, continuation_wav, meta['sample_rate'])
+    print(f"saved audio sample to {sample_path}")
+    print(f"saved continuation sample to {continuation_path}")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -240,6 +365,9 @@ def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
+    # Guard short debug runs where decay window is collapsed or invalid.
+    if lr_decay_iters <= warmup_iters:
+        return min_lr
     # 2) if it > lr_decay_iters, return min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -310,17 +438,20 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        # Sample from start token
-        with torch.no_grad():
-            start_token = torch.tensor([encode('<')], device='cuda:0')
-            end_token = encode('>')
-            logits = model.generate(start_token, max_new_tokens=block_size, end_tokens=end_token)
-            # Decode
-            response = decode(logits[0].tolist())
-            print(response)
+        save_audio_progress_sample(iter_num, raw_model)
+        # Optional text-only sampling hook for the arithmetic experiments.
+        if 'encode' in globals() and 'decode' in globals():
+            with torch.no_grad():
+                start_token = torch.tensor([encode('<')], device=device)[None, ...]
+                end_token = encode('>')
+                logits = model.generate(start_token, max_new_tokens=block_size, end_tokens=end_token)
+                response = decode(logits[0].tolist())
+                print(response)
 
-            with open('evolution.txt', 'a') as f:
-                f.write(response + '\n')
+                with open('evolution.txt', 'a') as f:
+                    f.write(response + '\n')
+        else:
+            response = ""
             
             
             if iter_num % eval_interval_extra == 0 and master_process and False:

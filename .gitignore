@@ -21,3 +21,10 @@ venv/
 *.onnx
 *.jsonl
 latest-run
+
+# Local audio experimentation artifacts
+data/audio_codec/raw/
+data/audio_librispeech_codec/raw/
+out-audio-codec/
+out-audio-librispeech/
+out-audio-librispeech-v2/
