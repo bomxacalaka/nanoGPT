@@ -1,0 +1,22 @@
+manifest_path = "data/audio_semantic_codec/critic_manifest.jsonl"
+out_dir = "out-audio-critic-v5"
+sample_rate = 24000
+batch_size = 8
+max_steps = 10000
+eval_interval = 200
+log_interval = 20
+learning_rate = 2e-4
+weight_decay = 1e-2
+grad_clip = 1.0
+device = "cuda"
+dtype = "float32"
+compile = False
+
+n_mels = 80
+n_fft = 1024
+hop_length = 256
+win_length = 1024
+max_frames = 512
+base_channels = 64
+hidden_dim = 256
+dropout = 0.1

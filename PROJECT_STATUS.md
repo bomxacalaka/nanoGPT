@@ -1,148 +1,155 @@
 # Project Status
 
 ## Purpose
-- Base repo is `nanoGPT`, adapted into a small custom character-level GPT playground.
-- Current visible directions are:
-  - a tiny arithmetic language model plus a browser inference/export path
-  - a newer audio-continuation branch using discrete EnCodec token streams
-- Secondary direction exists for text-to-JSON synthetic data generation, but that does not appear to be the main active demo right now.
+- Base repo is `nanoGPT`, now used primarily as a CLI-first playground for:
+  - a small character-level arithmetic/text model
+  - audio continuation experiments over EnCodec token streams
+- Web dashboard/server tooling has been removed; the intended workflow is back to simple commands like `python train.py config/train_shakespeare_char.py`.
 
-## Current Model
-- Training entrypoint is still [`train.py`](/home/jd/projects/aiplayground/nanoGPT/train.py) with the standard GPT-style decoder-only architecture from [`model.py`](/home/jd/projects/aiplayground/nanoGPT/model.py).
-- Text config:
-  - [`config/train_shakespeare_char.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_shakespeare_char.py)
-  - Dataset: `shakespeare_char`
-  - Output dir: `out-shakespeare-char`
-  - Context length: `128`
-  - Layers / heads / embedding: `6 / 6 / 120`
-  - Dropout: `0.3`
-  - Batch size: `64`
-  - Gradient accumulation: `8`
-  - Max iters: `100000`
-  - W&B: enabled, project `mini-models`, run name base `vibe_maths`
-- Latest checkpoint currently in [`out-shakespeare-char/ckpt.pt`](/home/jd/projects/aiplayground/nanoGPT/out-shakespeare-char/ckpt.pt) reports:
-  - `iter_num`: `1000`
-  - `best_val_loss`: `0.1658516824245453`
-  - Model args: `n_layer=6`, `n_head=6`, `n_embd=120`, `block_size=128`, `bias=False`, `vocab_size=28`, `dropout=0.3`
-- Active audio config:
-  - [`config/train_audio_librispeech_v2.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech_v2.py)
-  - Dataset: `audio_librispeech_codec`
-  - Output dir: `out-audio-librispeech-v2`
-  - Context length: `2048`
-  - Layers / heads / embedding: `8 / 8 / 256`
-  - Dropout: `0.1`
-  - Batch size: `8`
-  - Gradient accumulation: `4`
-  - Max iters: `20000`
+## Current CLI Flow
+- Main training entrypoint: [`train.py`](/home/jd/projects/aiplayground/nanoGPT/train.py)
+- Main text model: [`model.py`](/home/jd/projects/aiplayground/nanoGPT/model.py)
+- Main sampling entrypoint for text: [`sample.py`](/home/jd/projects/aiplayground/nanoGPT/sample.py)
+- Main sampling entrypoint for audio: [`sample_audio.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio.py)
+- README quick-start command is valid again:
+  - `python data/shakespeare_char/prepare.py`
+  - `python train.py config/train_shakespeare_char.py`
 
-## Tokenization
-- Tokenizer is custom and character-level, defined in [`tokenizer.py`](/home/jd/projects/aiplayground/nanoGPT/tokenizer.py).
-- Special-token support exists in code, but is currently disabled by default with `special_tokens = []`.
-- Current exported vocabulary size is `28`.
-- Current exported vocabulary is mostly lowercase letters plus newline, space, `-`, `<`, `>`.
-- This means the arithmetic model is learning text patterns at the character level, not number/operator tokens.
+## Text Path
+- Default text config: [`config/train_shakespeare_char.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_shakespeare_char.py)
+- Dataset: `shakespeare_char`
+- Latest known checkpoint: [`out-shakespeare-char/ckpt.pt`](/home/jd/projects/aiplayground/nanoGPT/out-shakespeare-char/ckpt.pt)
+  - `iter_num = 1000`
+  - `best_val_loss ~= 0.166`
 
-## Training Data
-- Active prepared dataset metadata in [`data/shakespeare_char/meta.pkl`](/home/jd/projects/aiplayground/nanoGPT/data/shakespeare_char/meta.pkl) points to [`data/shakespeare_char/000_999.txt`](/home/jd/projects/aiplayground/nanoGPT/data/shakespeare_char/000_999.txt).
-- That file contains arithmetic statements written in words, e.g. `<zero plus zero equals zero>`.
-- Current prepared split in [`data/shakespeare_char/prepare.py`](/home/jd/projects/aiplayground/nanoGPT/data/shakespeare_char/prepare.py):
-  - Uses a `99% / 1%` train/val split
-  - Splits on `>\n` to avoid cutting through a record
-  - Writes `train.bin`, `val.bin`, and `meta.pkl`
-- Other dataset files in the same folder suggest prior experiments with larger or alternate corpora:
-  - `0_9.txt`
-  - `0_999.txt`
-  - `base.txt`
-  - `corp.txt`
-  - `disease.txt`
-  - `input_old.txt`
-  - `input_test.txt`
-- Active audio dataset is [`data/audio_librispeech_codec/`](/home/jd/projects/aiplayground/nanoGPT/data/audio_librispeech_codec/), prepared from:
-  - train split: `Mini LibriSpeech train-clean-5`
-  - validation split: `Mini LibriSpeech dev-clean-2`
-  - raw size: about `902M`
-  - source files: `1519` train, `1089` val
-  - token counts: `11,537,988` train, `4,423,926` val
-  - codec setup: `encodec_24khz`, bandwidth `6.0`, `8` codebooks, `600` flattened tokens/sec, vocab size `8193`
+## Audio Path
+- Audio tokenization utilities: [`audio_codec.py`](/home/jd/projects/aiplayground/nanoGPT/audio_codec.py)
+- Dataset prep: [`data/audio_codec/prepare.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_codec/prepare.py)
+- Base speech dataset: [`data/audio_librispeech_codec/`](/home/jd/projects/aiplayground/nanoGPT/data/audio_librispeech_codec/)
+  - Mini LibriSpeech
+  - `encodec_24khz`, bandwidth `6.0`, `8` codebooks, `600` flattened tokens/sec
+- Best known flattened-token speech checkpoint: [`out-audio-librispeech-v2/ckpt.pt`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/ckpt.pt)
+  - `iter_num = 72000`
+  - `best_val_loss ~= 3.7965`
 
-## Export / Inference
-- There is an active ONNX/browser path in [`convert/convert.py`](/home/jd/projects/aiplayground/nanoGPT/convert/convert.py) and [`website/infer.html`](/home/jd/projects/aiplayground/nanoGPT/website/infer.html).
-- Browser demo branding currently says `Vibe Maths`.
-- Exported browser assets already exist in [`out-shakespeare-char/ckpt.onnx`](/home/jd/projects/aiplayground/nanoGPT/out-shakespeare-char/ckpt.onnx) and [`out-shakespeare-char/tokenizer.json`](/home/jd/projects/aiplayground/nanoGPT/out-shakespeare-char/tokenizer.json).
-- The website currently loads `model.onnx` and `tokenizer.json`, so path alignment may need checking before deployment.
+## Audio Architectures
+- Flattened-token GPT baseline:
+  - uses [`model.py`](/home/jd/projects/aiplayground/nanoGPT/model.py)
+  - active base config: [`config/train_audio_librispeech_v2.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech_v2.py)
+- Frame-level `v3` path:
+  - [`audio_frame_model.py`](/home/jd/projects/aiplayground/nanoGPT/audio_frame_model.py)
+  - configs:
+    - [`config/train_audio_librispeech_frame_v3.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech_frame_v3.py)
+    - [`config/train_audio_math_multivoice_frame_v3.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_math_multivoice_frame_v3.py)
+- Coarse/fine `v4` path:
+  - [`audio_coarse_fine_model.py`](/home/jd/projects/aiplayground/nanoGPT/audio_coarse_fine_model.py)
+  - configs:
+    - [`config/train_audio_librispeech_coarse_fine_v4.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech_coarse_fine_v4.py)
+    - [`config/train_audio_math_multivoice_coarse_fine_v4.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_math_multivoice_coarse_fine_v4.py)
+- Planned `v5` path:
+  - new from-scratch path: semantic-token AR model plus conditioned acoustic decoder
+  - design doc: [`AUDIO_V5_PLAN.md`](/home/jd/projects/aiplayground/nanoGPT/AUDIO_V5_PLAN.md)
+  - checklist: [`AUDIO_V5_CHECKLIST.md`](/home/jd/projects/aiplayground/nanoGPT/AUDIO_V5_CHECKLIST.md)
+  - decoder architecture note: [`AUDIO_V5_DECODER_ARCHITECTURE.md`](/home/jd/projects/aiplayground/nanoGPT/AUDIO_V5_DECODER_ARCHITECTURE.md)
+  - critique architecture note: [`AUDIO_V5_CRITIQUE_ARCHITECTURE.md`](/home/jd/projects/aiplayground/nanoGPT/AUDIO_V5_CRITIQUE_ARCHITECTURE.md)
+  - first building block added: [`audio_semantic_tokenizer.py`](/home/jd/projects/aiplayground/nanoGPT/audio_semantic_tokenizer.py)
+    - current backend: `encodec_coarse_v1`
+    - current semantic rate: about `25 Hz` with `frame_stride=3`
+    - next backend scaffolded: `hubert_kmeans_v1` using torchaudio HuBERT features plus external K-means centroids
+  - HuBERT centroid builder added: [`data/audio_semantic_codec/build_hubert_kmeans.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_semantic_codec/build_hubert_kmeans.py)
+    - torch-only K-means, no sklearn dependency
+    - tiny smoke build and HuBERT-backed `prepare.py` run both passed
+  - single-command runner added: [`run_audio_v5_hubert.sh`](/home/jd/projects/aiplayground/nanoGPT/run_audio_v5_hubert.sh)
+    - builds centroids, prepares dataset, trains semantic model, trains acoustic decoder, and samples with live console output
+  - dataset prep added: [`data/audio_semantic_codec/prepare.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_semantic_codec/prepare.py)
+    - writes aligned `*.semantic.bin`, `*.codec.bin`, `*.prosody.npy`, and `*.align.npy`
+    - now accepts semantic backend selection, including the HuBERT K-means scaffold
+  - semantic AR model added: [`audio_semantic_model.py`](/home/jd/projects/aiplayground/nanoGPT/audio_semantic_model.py)
+    - training batches now sample within utterance boundaries instead of across the global concatenated stream
+  - conditioned acoustic decoder added: [`audio_acoustic_decoder.py`](/home/jd/projects/aiplayground/nanoGPT/audio_acoustic_decoder.py)
+    - now uses a causal codec-frame decoder with cross-attention to:
+      - semantic token sequence
+      - prompt codec-frame prefix
+      - prompt prosody features
+    - decoder training now applies random prompt-prefix truncation/dropout so content has to come from semantics more often
+    - long continuation sampling now returns the full generated frame sequence instead of truncating to the decoder context window
+    - explicit prompt prosody features:
+      - `log_pitch_hz`
+      - `log_energy`
+      - `voiced`
+  - base configs added:
+    - [`config/train_audio_semantic_v5.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_semantic_v5.py)
+    - [`config/train_audio_acoustic_decoder_v5.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_acoustic_decoder_v5.py)
+  - new `v5.3` diagnostic coarse stage added:
+    - frame-rate semantic upsampler: [`audio_semantic_upsampler.py`](/home/jd/projects/aiplayground/nanoGPT/audio_semantic_upsampler.py)
+    - coarse-only decoder over the first codec codebook: [`audio_coarse_decoder.py`](/home/jd/projects/aiplayground/nanoGPT/audio_coarse_decoder.py)
+    - coarse decoder config: [`config/train_audio_coarse_decoder_v5.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_coarse_decoder_v5.py)
+    - diagnostic sampler: [`sample_audio_v5_coarse.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio_v5_coarse.py)
+    - purpose: test whether coarse linguistic/acoustic structure becomes more intelligible before adding a learned fine decoder
+    - current sampler fills residual codebooks heuristically from the prompt tail, so output is intentionally low-fidelity and diagnostic
+  - new `v5.4` learned fine stage added:
+    - residual-codebook decoder: [`audio_fine_decoder.py`](/home/jd/projects/aiplayground/nanoGPT/audio_fine_decoder.py)
+    - fine decoder config: [`config/train_audio_fine_decoder_v5.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_fine_decoder_v5.py)
+    - two-stage sampler: [`sample_audio_v5_two_stage.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio_v5_two_stage.py)
+    - predicts codebooks `1..N-1` from:
+      - coarse codebook `0`
+      - upsampled semantic features
+      - prompt codec prefix
+      - prompt prosody
+    - fine-stage inference runs in chunks when requested continuation exceeds the fine decoder block size
+    - structured critique metrics added:
+      - [`audio_critique_metrics.py`](/home/jd/projects/aiplayground/nanoGPT/audio_critique_metrics.py)
+    - two-stage sampler now writes `*_metrics.json` with:
+        - semantic consistency
+        - prosody drift
+        - coarse-code accuracy
+        - residual-code accuracy
+      - two-stage sampler now also saves target continuation audio when available
+  - first `v5.5` learned critique scaffold added:
+    - critic model: [`audio_critic.py`](/home/jd/projects/aiplayground/nanoGPT/audio_critic.py)
+    - critic manifest builder: [`data/audio_semantic_codec/build_critic_manifest.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_semantic_codec/build_critic_manifest.py)
+    - critic train config: [`config/train_audio_critic_v5.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_critic_v5.py)
+    - critic trainer: [`train_audio_critic_v5.py`](/home/jd/projects/aiplayground/nanoGPT/train_audio_critic_v5.py)
+    - current setup is non-adversarial:
+      - prompt / generated / target continuation in
+      - predicts:
+        - realism
+        - intelligibility
+        - style match
+        - prosody match
+        - semantic match
+      - supervised from heuristic critique scores derived from saved sample metrics
+  - sampling entrypoint added: [`sample_audio_v5.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio_v5.py)
+    - supports `semantic_source=predicted|ground_truth` for decoder diagnostics
+    - prompt preview now uses codec-normalized audio so saved prompt playback speed matches generated output
+  - current smoke status:
+    - `train.py` `eval_only` works for both `audio_semantic_gpt` and `audio_acoustic_decoder`
+    - `sample_audio_v5.py` runs end-to-end with synthetic smoke checkpoints
+    - `data/audio_semantic_codec/prepare.py` writes `train.prosody.npy` and `val.prosody.npy`
+    - semantic `train.py` path with utterance-bounded batching passes `eval_only`
+    - `sample_audio_v5.py --semantic_source=ground_truth` passes for decoder-isolation diagnostics
+    - `train.py` `eval_only` passes for `audio_coarse_decoder`
+    - `sample_audio_v5_coarse.py` runs end-to-end with smoke checkpoints
+    - `train.py` `eval_only` passes for `audio_fine_decoder`
+    - `sample_audio_v5_two_stage.py` runs end-to-end with smoke checkpoints
+    - `sample_audio_v5_two_stage.py` prints and saves structured critique metrics
+    - `train_audio_critic_v5.py` passes a tiny smoke run on a one-example manifest
+    - old pre-cross-attention acoustic decoder checkpoints are incompatible with the current `audio_acoustic_decoder.py` and should be retrained from scratch
 
-## Audio Work
-- Audio continuation is working around discrete EnCodec token streams rather than mel-spectrogram regression.
-- New audio files:
-  - [`audio_codec.py`](/home/jd/projects/aiplayground/nanoGPT/audio_codec.py)
-  - [`data/audio_codec/prepare.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_codec/prepare.py)
-  - [`config/train_audio_codec.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_codec.py)
-  - [`config/train_audio_librispeech.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech.py)
-  - [`config/train_audio_librispeech_v2.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_librispeech_v2.py)
-  - [`AUDIO_CONTINUATION_PLAN.md`](/home/jd/projects/aiplayground/nanoGPT/AUDIO_CONTINUATION_PLAN.md)
-  - [`sample_audio.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio.py)
-  - [`sample_audio_from_text.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio_from_text.py)
-- Current audio path status:
-  - `encodec` installed in the `aiplayground` conda environment
-  - MeloTTS prompt testing now works from text by loading the official repo from `/tmp/MeloTTS`
-  - extra runtime packages added in `aiplayground` to satisfy MeloTTS under Python 3.12, including `fugashi` and `soxr`
-  - helper code verified to encode and decode synthetic and real 24 kHz mono clips
-  - flattened-codebook sampling is constrained by valid codebook ranges, so generated token streams stay decodable
-  - first smoke dataset was Free Spoken Digit Dataset (`3000` clips, about `42M` raw)
-  - current phrase-level dataset is Mini LibriSpeech in [`data/audio_librispeech_codec/`](/home/jd/projects/aiplayground/nanoGPT/data/audio_librispeech_codec/)
-  - current best phrase-level checkpoint in [`out-audio-librispeech-v2/ckpt.pt`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/ckpt.pt) reports:
-    - `iter_num`: `250`
-    - `best_val_loss`: `5.5064`
-    - model args: `n_layer=8`, `n_head=8`, `n_embd=256`, `block_size=2048`, `vocab_size=8193`, `dropout=0.1`
-  - a smaller prior LibriSpeech baseline still exists in [`out-audio-librispeech/ckpt.pt`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/ckpt.pt) with `best_val_loss ~= 5.838`
-  - end-to-end prompt-to-waveform sampling succeeded with [`sample_audio.py`](/home/jd/projects/aiplayground/nanoGPT/sample_audio.py)
-  - spoken-digit example generated file: [`out-audio-codec/generated_3_nicolas_7.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-codec/generated_3_nicolas_7.wav)
-  - training-time audio progress now saves prompt, full output, and continuation-only clips under [`out-audio-librispeech-v2/samples/`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples)
-  - sampling scripts now warn when prompt duration exceeds the model's effective context window
+## Audio Data
+- Synthetic math speech generator: [`data/audio_math_codec/generate_melotts_math.py`](/home/jd/projects/aiplayground/nanoGPT/data/audio_math_codec/generate_melotts_math.py)
+- Larger multivoice math dataset: [`data/audio_math_multivoice_large_codec/`](/home/jd/projects/aiplayground/nanoGPT/data/audio_math_multivoice_large_codec/)
+- New `v5` speech dataset directory: [`data/audio_semantic_codec/`](/home/jd/projects/aiplayground/nanoGPT/data/audio_semantic_codec/)
+- Existing fine-tune configs:
+  - [`config/train_audio_math_v1.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_math_v1.py)
+  - [`config/train_audio_math_multivoice_v1.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_math_multivoice_v1.py)
+  - [`config/train_audio_math_multivoice_v2.py`](/home/jd/projects/aiplayground/nanoGPT/config/train_audio_math_multivoice_v2.py)
 
-## Results And Evidence
-- Best explicit metric found so far is `best_val_loss ~= 0.166` from the latest checkpoint.
-- Best phrase-level audio run so far is `best_val_loss ~= 5.506` on Mini LibriSpeech with the wider-context `v2` config.
-- Saved `v2` continuation-only samples currently include:
-  - [`out-audio-librispeech-v2/samples/step_000000_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000000_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000050_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000050_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000100_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000100_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000150_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000150_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000200_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000200_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000250_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000250_continuation.wav)
-  - [`out-audio-librispeech-v2/samples/step_000300_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-v2/samples/step_000300_continuation.wav)
-- A text-prompt smoke test now exists under [`out-audio-librispeech/tts_prompt_tests/`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/tts_prompt_tests):
-  - raw MeloTTS prompt: [`generated_from_text_prompt_trimmed.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/tts_prompt_tests/generated_from_text_prompt_trimmed.wav)
-  - EnCodec round-trip prompt: [`generated_from_text_prompt_codec.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/tts_prompt_tests/generated_from_text_prompt_codec.wav)
-  - full prompt-plus-continuation output: [`generated_from_text_full.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/tts_prompt_tests/generated_from_text_full.wav)
-  - continuation-only clip: [`generated_from_text_continuation.wav`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech/tts_prompt_tests/generated_from_text_continuation.wav)
-- [`evolution.txt`](/home/jd/projects/aiplayground/nanoGPT/evolution.txt) looks like a raw generations scratchpad showing failure modes and malformed arithmetic outputs from earlier runs.
-- Existing output folders suggest multiple training/export attempts:
-  - `out-audio-codec`
-  - `out-audio-librispeech`
-  - `out-audio-librispeech-v2`
-  - `out-shakespeare-char`
-  - `out-shakespeare-char-best`
-  - `out-shakespeare-char-json-base`
-  - `out-shakespeare-char_old`
-  - `out-shakespeare`
-  - `out-shakespeare_old`
-
-## History So Far
-- Started from upstream `nanoGPT`.
-- Added a custom character tokenizer and custom dataset preparation flow.
-- Shifted at least one main experiment toward arithmetic-in-words generation.
-- Added synthetic data generation for a separate text-to-JSON task in [`data/synthetic_gen/gen.py`](/home/jd/projects/aiplayground/nanoGPT/data/synthetic_gen/gen.py), which writes training-style records into [`data/shakespeare/input.txt`](/home/jd/projects/aiplayground/nanoGPT/data/shakespeare/input.txt).
-- Added ONNX export plus a lightweight browser inference UI.
-- Started an EnCodec-based audio continuation path that preserves the repo's next-token training pattern.
-- Pre-audio rollback checkpoint commit is `0e80c0d` (`checkpoint before audio continuation work`).
-- Patched `train.py` so non-text token datasets can train without `stoi` / `itos` metadata and without the text-only arithmetic sampling hook.
-- Repo currently has signs of in-progress work:
-  - Deleted tracked file: `export_onnx.py`
-  - Modified tracked file: `sample.ipynb`
-  - Untracked directories: `convert/`, `website/`
-
-## Working Notes
-- Keep this file short and summary-first.
-- Update bullets in place instead of appending long chronological logs.
-- If a change is temporary, note it under `History So Far` or replace stale bullets instead of expanding the file indefinitely.
+## Notes
+- `train.py` writes `train.log` in the run output dir and supports periodic checkpoint snapshots.
+- Audio prep now caches encoded per-file shards under `.prepare_cache`, so reruns can resume without re-encoding finished files.
+- A previous `v3` frame-model run failed while saving a checkpoint because the filesystem filled up; the incomplete file was quarantined as [`out-audio-librispeech-frame-v3/ckpt.corrupt_step_000500.pt`](/home/jd/projects/aiplayground/nanoGPT/out-audio-librispeech-frame-v3/ckpt.corrupt_step_000500.pt).
+- Pre-audio rollback checkpoint commit is `0e80c0d`.
+- Current next-direction is `v5`: a new from-scratch speech-native stack with semantic AR plus separate acoustic decoding, instead of pushing more scale into raw codec-token AR.
+- Current next experiment inside `v5` is `v5.4`: semantic upsampling plus a coarse first-codebook decoder followed by a learned fine residual decoder.
+- First `v5.5` step is now in place: a learned multi-head critic scaffold trained on saved generator outputs and heuristic critique labels.

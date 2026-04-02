@@ -82,11 +82,16 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
+special_end_token = None
+try:
+    special_end_token = encode('<|end|>')
+except Exception:
+    special_end_token = None
+
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            special_end_token = encode('<|end|>')
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k, end_tokens=special_end_token)
             print(decode(y[0].tolist()))
             print('---------------')

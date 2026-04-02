@@ -19,6 +19,7 @@ class AudioTokenBatch:
     channels: int
     codebook_size: int
     num_codebooks: int
+    normalized_wav: Optional[torch.Tensor] = None
 
 
 def _require_encodec():
@@ -91,6 +92,33 @@ def unflatten_codes(flat_tokens: torch.Tensor, num_codebooks: int, codebook_size
     return codes - offsets
 
 
+def flat_tokens_to_frame_codes(flat_tokens: torch.Tensor, num_codebooks: int, codebook_size: int) -> torch.Tensor:
+    if flat_tokens.shape[-1] % num_codebooks != 0 and flat_tokens.dim() == 1:
+        raise ValueError("Flattened token count must be divisible by num_codebooks")
+
+    if flat_tokens.dim() == 1:
+        frame_tokens = flat_tokens.view(-1, num_codebooks)
+    elif flat_tokens.dim() == 2 and flat_tokens.size(-1) == num_codebooks:
+        frame_tokens = flat_tokens
+    elif flat_tokens.dim() == 3 and flat_tokens.size(-1) == num_codebooks:
+        frame_tokens = flat_tokens
+    else:
+        raise ValueError(
+            f"Expected flattened tokens shaped [tokens] or frame tokens [..., num_codebooks], got {tuple(flat_tokens.shape)}"
+        )
+
+    offsets = torch.arange(num_codebooks, device=frame_tokens.device, dtype=frame_tokens.dtype) * codebook_size
+    return frame_tokens - offsets
+
+
+def frame_codes_to_flat_tokens(frame_codes: torch.Tensor, codebook_size: int) -> torch.Tensor:
+    if frame_codes.dim() != 2:
+        raise ValueError(f"Expected frame codes shaped [time, num_codebooks], got {tuple(frame_codes.shape)}")
+    num_codebooks = frame_codes.size(1)
+    offsets = torch.arange(num_codebooks, device=frame_codes.device, dtype=frame_codes.dtype) * codebook_size
+    return (frame_codes + offsets).reshape(-1)
+
+
 def encode_waveform(
     model,
     wav: torch.Tensor,
@@ -102,6 +130,7 @@ def encode_waveform(
     _, convert_audio = _require_encodec()
 
     wav = convert_audio(wav, sample_rate, model.sample_rate, model.channels)
+    normalized_wav = wav.cpu()
     wav = wav.unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -117,6 +146,7 @@ def encode_waveform(
         channels=model.channels,
         codebook_size=codebook_size,
         num_codebooks=codes.size(0),
+        normalized_wav=normalized_wav,
     )
 
 
@@ -170,10 +200,22 @@ def generate_audio_tokens(
     idx = prompt_tokens
     max_new_tokens = max_new_tokens - (max_new_tokens % num_codebooks)
 
+    cached_logits = None
+    cached_kvs = None
+    cached_window_length = 0
+    if hasattr(model, "forward_with_kv_cache"):
+        prompt_window = idx[:, -min(idx.size(1), model.config.block_size):]
+        if prompt_window.size(1) > 0:
+            cached_logits, cached_kvs = model.forward_with_kv_cache(prompt_window)
+            cached_window_length = prompt_window.size(1)
+
     for _ in range(max_new_tokens):
-        idx_cond = idx if idx.size(1) <= model.config.block_size else idx[:, -model.config.block_size:]
-        logits, _ = model(idx_cond)
-        logits = logits[:, -1, :] / temperature
+        if cached_logits is not None:
+            logits = cached_logits[:, -1, :] / temperature
+        else:
+            idx_cond = idx if idx.size(1) <= model.config.block_size else idx[:, -model.config.block_size:]
+            logits, _ = model(idx_cond)
+            logits = logits[:, -1, :] / temperature
 
         next_position = idx.size(1)
         codebook_index = next_position % num_codebooks
@@ -191,5 +233,12 @@ def generate_audio_tokens(
         probs = F.softmax(logits, dim=-1)
         idx_next = torch.multinomial(probs, num_samples=1)
         idx = torch.cat((idx, idx_next), dim=1)
+
+        if cached_kvs is not None and cached_window_length < model.config.block_size:
+            cached_logits, cached_kvs = model.forward_with_kv_cache(idx_next, past_kvs=cached_kvs)
+            cached_window_length += 1
+        else:
+            cached_logits = None
+            cached_kvs = None
 
     return idx

@@ -14,6 +14,8 @@ venv/
 # Datasets, logs and models
 *.log
 *.csv
+*.npy
+*.wav
 *.json
 *.yaml
 *.wandb
@@ -25,6 +27,11 @@ latest-run
 # Local audio experimentation artifacts
 data/audio_codec/raw/
 data/audio_librispeech_codec/raw/
+data/audio_math_codec/raw/
+data/audio_math_multivoice_codec/raw/
 out-audio-codec/
 out-audio-librispeech/
 out-audio-librispeech-v2/
+out-audio-librispeech-v2-monitor-test/
+out-audio-math-v1/
+out-audio-math-multivoice-v1/

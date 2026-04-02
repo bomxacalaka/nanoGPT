@@ -9,6 +9,8 @@ The intended pipeline is:
 """
 
 import argparse
+import hashlib
+import json
 import math
 import os
 import pickle
@@ -18,6 +20,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -31,6 +38,65 @@ from audio_codec import load_encodec_model
 
 
 SUPPORTED_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
+
+
+def num_codebooks_for_bandwidth(bandwidth: float):
+    return {1.5: 2, 3.0: 4, 6.0: 8, 12.0: 16, 24.0: 32}.get(float(bandwidth))
+
+
+def file_cache_paths(cache_dir: Path, path: Path):
+    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}.npy", cache_dir / f"{digest}.json"
+
+
+def load_cached_tokens(cache_dir: Path, path: Path):
+    cache_tokens_path, cache_meta_path = file_cache_paths(cache_dir, path)
+    if not cache_tokens_path.exists() or not cache_meta_path.exists():
+        return None
+
+    stat = path.stat()
+    with cache_meta_path.open("r", encoding="utf-8") as handle:
+        cached = json.load(handle)
+
+    if (
+        cached.get("source_path") != str(path.resolve())
+        or cached.get("source_size") != stat.st_size
+        or cached.get("source_mtime_ns") != stat.st_mtime_ns
+    ):
+        return None
+
+    return np.load(cache_tokens_path), int(cached.get("chunk_count", 0))
+
+
+def save_cached_tokens(cache_dir: Path, path: Path, tokens: np.ndarray, chunk_count: int):
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_tokens_path, cache_meta_path = file_cache_paths(cache_dir, path)
+    stat = path.stat()
+    np.save(cache_tokens_path, tokens)
+    with cache_meta_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "source_path": str(path.resolve()),
+                "source_size": stat.st_size,
+                "source_mtime_ns": stat.st_mtime_ns,
+                "chunk_count": int(chunk_count),
+                "token_count": int(len(tokens)),
+            },
+            handle,
+        )
+
+
+def progress_iter(files, split_name: str):
+    if tqdm is not None:
+        return tqdm(
+            files,
+            desc=f"{split_name:5s}",
+            unit="file",
+            file=sys.stdout,
+            dynamic_ncols=False,
+            leave=True,
+        )
+    return files
 
 
 def parse_args():
@@ -77,15 +143,27 @@ def split_files(files, val_frac: float, seed: int):
     return train_files, val_files
 
 
-def encode_files(files, model, args):
+def encode_files(files, model, args, cache_dir: Path, split_name: str):
     tokens = []
     total_chunks = 0
-    separator_token_id = None
+    num_codebooks = num_codebooks_for_bandwidth(args.bandwidth)
+    separator_token_id = (args.codebook_size * num_codebooks) if num_codebooks is not None else None
 
     chunk_num_samples = int(args.chunk_seconds * model.sample_rate) if args.chunk_seconds > 0 else None
 
-    for path in files:
+    for index, path in enumerate(progress_iter(files, split_name), start=1):
+        cached = load_cached_tokens(cache_dir, path)
+        if cached is not None:
+            cached_tokens, cached_chunks = cached
+            tokens.append(cached_tokens)
+            total_chunks += cached_chunks
+            if tqdm is None:
+                print(f"[{split_name}] {index}/{len(files)} cache {path}", flush=True)
+            continue
+
         wav, sample_rate = load_audio(str(path))
+        file_tokens = []
+        file_chunks = 0
         for chunk in chunk_waveform(wav, chunk_num_samples):
             batch = encode_waveform(
                 model,
@@ -96,9 +174,25 @@ def encode_files(files, model, args):
             )
             if separator_token_id is None:
                 separator_token_id = batch.codebook_size * batch.num_codebooks
-            tokens.append(batch.flattened_tokens.numpy())
-            tokens.append(np.array([separator_token_id], dtype=np.int64))
-            total_chunks += 1
+            file_tokens.append(batch.flattened_tokens.numpy())
+            file_tokens.append(np.array([separator_token_id], dtype=np.int64))
+            file_chunks += 1
+
+        if file_tokens:
+            flat_file_tokens = np.concatenate(file_tokens)
+        else:
+            flat_file_tokens = np.array([], dtype=np.int64)
+
+        if separator_token_id is not None and separator_token_id <= np.iinfo(np.uint16).max:
+            flat_file_tokens = flat_file_tokens.astype(np.uint16)
+        else:
+            flat_file_tokens = flat_file_tokens.astype(np.uint32)
+
+        save_cached_tokens(cache_dir, path, flat_file_tokens, file_chunks)
+        tokens.append(flat_file_tokens)
+        total_chunks += file_chunks
+        if tqdm is None:
+            print(f"[{split_name}] {index}/{len(files)} encode {path}", flush=True)
 
     if not tokens:
         return np.array([], dtype=np.uint16), total_chunks, separator_token_id
@@ -113,6 +207,8 @@ def encode_files(files, model, args):
 
 def main():
     args = parse_args()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         model = load_encodec_model(
@@ -140,15 +236,29 @@ def main():
     print(f"Found {len(files)} source files")
     print(f"Train files: {len(train_files)} | Val files: {len(val_files)}")
 
-    train_tokens, train_chunks, separator_token_id = encode_files(train_files, model, args)
-    val_tokens, val_chunks, _ = encode_files(val_files, model, args)
+    cache_root = output_dir / ".prepare_cache" / (
+        f"{args.model_name}_bw{args.bandwidth:g}_chunk{args.chunk_seconds:g}_cb{args.codebook_size}"
+    )
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    train_tokens, train_chunks, separator_token_id = encode_files(
+        train_files,
+        model,
+        args,
+        cache_root / "train",
+        "train",
+    )
+    val_tokens, val_chunks, _ = encode_files(
+        val_files,
+        model,
+        args,
+        cache_root / "val",
+        "val",
+    )
+
     train_tokens.tofile(output_dir / "train.bin")
     val_tokens.tofile(output_dir / "val.bin")
 
-    num_codebooks = {1.5: 2, 3.0: 4, 6.0: 8, 12.0: 16, 24.0: 32}.get(float(args.bandwidth))
+    num_codebooks = num_codebooks_for_bandwidth(args.bandwidth)
 
     meta = {
         "dataset_type": "audio_codec",
@@ -167,6 +277,7 @@ def main():
         "data_dtype": str(train_tokens.dtype),
         "input_dir": str(Path(args.input_dir).resolve()),
         "val_input_dir": str(Path(args.val_input_dir).resolve()) if args.val_input_dir else "",
+        "cache_dir": str(cache_root.resolve()),
         "num_source_files": len(files),
         "train_files": len(train_files),
         "val_files": len(val_files),

@@ -49,7 +49,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, past_kv=None, use_cache=False):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -57,15 +57,30 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat((past_k, k), dim=2)
+            v = torch.cat((past_v, v), dim=2)
+
+        present = (k, v) if use_cache else None
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            use_causal_mask = past_kv is None
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=use_causal_mask,
+            )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if past_kv is None:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -73,7 +88,7 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y
+        return y, present
 
 class MLP(nn.Module):
 
@@ -100,10 +115,11 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, past_kv=None, use_cache=False):
+        attn_out, present = self.attn(self.ln_1(x), past_kv=past_kv, use_cache=use_cache)
+        x = x + attn_out
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, present
 
 @dataclass
 class GPTConfig:
@@ -181,7 +197,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(torch.arange(pos_t, device=device)) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x, _ = block(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -194,6 +210,40 @@ class GPT(nn.Module):
             loss = None
 
         return logits, loss
+
+    def forward_with_kv_cache(self, idx, past_kvs=None):
+        device = idx.device
+        t = idx.size(1)
+        if t <= 0:
+            raise ValueError("idx must contain at least one token")
+
+        if past_kvs is None:
+            past_kvs = [None] * len(self.transformer.h)
+            past_length = 0
+        else:
+            if len(past_kvs) != len(self.transformer.h):
+                raise ValueError("past_kvs length must match transformer depth")
+            first_past = next((item for item in past_kvs if item is not None), None)
+            past_length = first_past[0].size(2) if first_past is not None else 0
+
+        if past_length + t > self.config.block_size:
+            raise ValueError(
+                f"past length {past_length} with current length {t} exceeds block_size {self.config.block_size}"
+            )
+
+        pos = torch.arange(past_length, past_length + t, dtype=torch.long, device=device)
+        tok_emb = self.transformer.wte(idx)
+        pos_emb = self.transformer.wpe(pos)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        presents = []
+        for block, past_kv in zip(self.transformer.h, past_kvs):
+            x, present = block(x, past_kv=past_kv, use_cache=True)
+            presents.append(present)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x[:, [-1], :])
+        return logits, presents
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
